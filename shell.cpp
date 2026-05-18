@@ -6,6 +6,25 @@
 #include <vector>
 #include <sstream>
 
+#pragma comment(lib, "ntdll.lib")
+
+typedef struct _MY_SYSTEM_PROCESS_INFORMATION 
+{
+    ULONG NextEntryOffset;
+    ULONG NumberOfThreads;
+    LARGE_INTEGER WorkingSetPrivateSize;
+    ULONG HardFaultCount;
+    ULONG NumberOfThreadsHighWatermark;
+    ULONGLONG CycleTime;
+    LARGE_INTEGER CreateTime;
+    LARGE_INTEGER UserTime;
+    LARGE_INTEGER KernelTime;
+    UNICODE_STRING ImageName;
+    KPRIORITY BasePriority;
+    HANDLE UniqueProcessId;
+    HANDLE InheritedFromUniqueProcessId;
+} MY_SYSTEM_PROCESS_INFORMATION, *PMY_SYSTEM_PROCESS_INFORMATION;
+
 
 typedef std::string (*CommandRoutine)(const std::string& args);
 std::map<std::string, CommandRoutine> g_CommandMap;
@@ -38,7 +57,7 @@ void static send_output(std::string output)
 
 #pragma region Commands
 
-std::string InternalCommand_LS(const std::string& args)
+std::string static InternalCommand_LS(const std::string& args)
 {
 
     // Default to the current directory if no path is provided
@@ -81,7 +100,7 @@ std::string InternalCommand_LS(const std::string& args)
     return output.str();
 }
 
-std::string InternalCommand_CD(const std::string& args)
+std::string static InternalCommand_CD(const std::string& args)
 {
 
     if(args == "") return "cd requires arguments.";
@@ -92,7 +111,7 @@ std::string InternalCommand_CD(const std::string& args)
     return "";
 }
 
-std::string InternalCommand_whoami(const std::string& args)
+std::string static InternalCommand_WHOAMI(const std::string& args)
 {
     HANDLE hToken = NULL;
     
@@ -135,15 +154,91 @@ std::string InternalCommand_whoami(const std::string& args)
     return std::string(domainName) + "\\" + std::string(userName) + "\n";
 }
 
+std::string static InternalCommand_PS(const std::string& args)
+{
+
+    std::stringstream output;
+
+    ULONG bufferSize = 1024 * 1024; 
+    PVOID buffer = VirtualAlloc(NULL, bufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if(buffer == NULL)
+    {
+        return "Error: Initial VirtualAlloc failed.\n";
+    }
+
+    NTSTATUS status;
+    while(true)
+    {
+        status = NtQuerySystemInformation(SystemProcessInformation, buffer, bufferSize, &bufferSize);
+        
+        if(status == 0xC0000004)
+        {
+            VirtualFree(buffer, 0, MEM_RELEASE);
+            bufferSize += (1024 * 1024); // Add another 1MB and try again
+            buffer = VirtualAlloc(NULL, bufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if(buffer == NULL)
+            {
+                return "Error: Reallocation VirtualAlloc failed.\n";
+            }
+        }
+
+        else break;
+    }
+
+    if(!NT_SUCCESS(status))
+    {
+        output << "Error: NtQuerySystemInformation failed with status " << std::hex << status << "\n";
+
+        if(buffer != NULL) VirtualFree(buffer, 0, MEM_RELEASE);
+        return output.str();
+    }
 
 
-void InitializeMicroShell()
+    PMY_SYSTEM_PROCESS_INFORMATION pInfo = (PMY_SYSTEM_PROCESS_INFORMATION)buffer;
+        
+    output << "PID\tPPID\tName\n";
+    output << "----------------------------------------\n";
+
+    while(true)
+    {
+        DWORD pid = (DWORD)(ULONG_PTR)pInfo->UniqueProcessId;
+        DWORD ppid = (DWORD)(ULONG_PTR)pInfo->InheritedFromUniqueProcessId;
+            
+        std::string procName = "[System or Unknown]";
+        
+        if(pInfo->ImageName.Buffer != NULL)
+        {
+            int size_needed = WideCharToMultiByte(CP_UTF8, 0, pInfo->ImageName.Buffer, (int)(pInfo->ImageName.Length / sizeof(WCHAR)), NULL, 0, NULL, NULL);
+            std::string convertedName(size_needed, 0);
+            WideCharToMultiByte(CP_UTF8, 0, pInfo->ImageName.Buffer, (int)(pInfo->ImageName.Length / sizeof(WCHAR)), &convertedName[0], size_needed, NULL, NULL);
+            
+            procName = convertedName;
+        }
+
+        output << pid << "\t" << ppid << "\t" << procName << "\n";
+
+        if(pInfo->NextEntryOffset == 0)
+        {
+            break;
+        }
+            
+        pInfo = (PMY_SYSTEM_PROCESS_INFORMATION)((PUCHAR)pInfo + pInfo->NextEntryOffset);
+    }
+
+
+    VirtualFree(buffer, 0, MEM_RELEASE);
+    return output.str();
+
+}
+
+void static InitializeMicroShell()
 {
     g_CommandMap["ls"] = InternalCommand_LS;
     g_CommandMap["dir"] = InternalCommand_LS;
     g_CommandMap["cd"] = InternalCommand_CD;
-    g_CommandMap["whoami"] = InternalCommand_whoami;
-    // to add: whoami, cls, ping, mkdir, rm, etc.. something to send and get raw data
+    g_CommandMap["whoami"] = InternalCommand_WHOAMI;
+    g_CommandMap["ps"] = InternalCommand_PS;
+    // to add: run exes, mkdir, rm, etc.. something to send and get raw data
 }
 
 #pragma endregion
