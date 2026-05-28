@@ -232,12 +232,37 @@ typedef struct _MY_PEB
     ULONGLONG ExtendedFeatureDisableMask;                                   //0x7c8
 } _MY_PEB, *_MY_PPEB; 
 
+typedef struct _FILE_BOTH_DIR_INFORMATION
+{
+    ULONG         NextEntryOffset;
+    ULONG         FileIndex;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER EndOfFile;
+    LARGE_INTEGER AllocationSize;
+    ULONG         FileAttributes;
+    ULONG         FileNameLength;
+    ULONG         EaSize;
+    CCHAR         ShortNameLength;
+    WCHAR         ShortName[12];
+    WCHAR         FileName[1]; // Variable length
+} FILE_BOTH_DIR_INFORMATION, *PFILE_BOTH_DIR_INFORMATION;
+
 
 typedef std::string (*CommandRoutine)(const std::string& args);
 std::map<std::string, CommandRoutine> g_CommandMap;
 
 
 std::string static ExecuteMicroShell(std::string input_command);
+
+// --------------------------------------------------------------------------------------------
+
+#pragma region Helpers
+
+
+#pragma endregion
 
 // --------------------------------------------------------------------------------------------
 
@@ -267,45 +292,111 @@ void static send_output(std::string output)
 std::string static InternalCommand_LS(const std::string& args)
 {
 
-	// Default to the current directory if no path is provided
-	std::string searchPath = args.empty() ? ".\\*" : args;
-	
-	// Format the search string correctly for the Win32 API (requires trailing wildcard)
-	if(!args.empty() && args.back() != '*' && args.back() != '\\') searchPath += "\\*";
-	else if(!args.empty() && args.back() == '\\') searchPath += "*";
-	
-	WIN32_FIND_DATAA findData;
-	HANDLE hFind = INVALID_HANDLE_VALUE;
-	hFind = FindFirstFileA(searchPath.c_str(), &findData);
+	std::string searchPath = args.empty() ? "." : args;
+	std::string wildcard = "*";
 
-	if(hFind == INVALID_HANDLE_VALUE) return "ls: cannot access '" + args + "': No such file or directory\n";
-
-	std::stringstream output;
-	output << "\nType\tSize\t\tName\n";
-	output << "------------------------------------------------\n";
-
-	do
+	// If the user provided a wildcard, we extract it
+    size_t lastSlash = searchPath.find_last_of("\\/");
+    if(lastSlash != std::string::npos)
 	{
-		// Skip the current and parent directory markers to reduce noise
-		std::string fileName = findData.cFileName;
-		if(fileName == "." || fileName == "..") continue;
+        // Check if there is a wildcard after the last slash
+        if(searchPath.find('*', lastSlash) != std::string::npos || searchPath.find('?', lastSlash) != std::string::npos)
+		{
+            wildcard = searchPath.substr(lastSlash + 1);
+            searchPath = searchPath.substr(0, lastSlash);
+            if (searchPath.empty()) searchPath = "\\"; // Handle root drive edge case
+        }
+    }
+	else if(searchPath.find('*') != std::string::npos || searchPath.find('?') != std::string::npos)
+	{
+        // Only a wildcard was provided (e.g., "*.txt")
+        wildcard = searchPath;
+        searchPath = ".";
+	}
 
-		std::string type = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? "[DIR]" : "[FILE]";
-		
-		// Calculate exact file size (HighPart * MAXDWORD + LowPart)
-		ULARGE_INTEGER fileSize;
-		fileSize.LowPart = findData.nFileSizeLow;
-		fileSize.HighPart = findData.nFileSizeHigh;
-		
-		std::string sizeStr = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? "<DIR>" : std::to_string(fileSize.QuadPart);
+	char absPath[MAX_PATH];
+	GetFullPathNameA(searchPath.c_str(), MAX_PATH, absPath, NULL);
 
-		output << type << "\t" << sizeStr << "\t\t" << fileName << "\n";
-		
-	} while(FindNextFileA(hFind, &findData));
+	std::string ntPathStr = "\\??\\" + std::string(absPath);
+	std::wstring wNtPath(ntPathStr.begin(), ntPathStr.end());
+	std::wstring wWildcard(wildcard.begin(), wildcard.end());
 
-	FindClose(hFind);
-	return output.str();
+	UNICODE_STRING ntPath, searchPattern;
+    RtlInitUnicodeString(&ntPath, wNtPath.c_str());
+    RtlInitUnicodeString(&searchPattern, wWildcard.c_str());
+
+	OBJECT_ATTRIBUTES objAttr;
+	InitializeObjectAttributes(&objAttr, &ntPath, 0, NULL, NULL);
+	IO_STATUS_BLOCK ioStatusBlock;
+	HANDLE hDirectory = NULL;
+
+
+    NTSTATUS sysstatus = (NTSTATUS)(INT_PTR)SysFunction("NtOpenFile", &hDirectory, 0x100001, &objAttr, &ioStatusBlock, FILE_SHARE_READ | FILE_SHARE_WRITE, 0x4021);
+	if(!NT_SUCCESS(sysstatus)) return "ls: cannot access '" + args + "': No such file or directory\n";
+
+	std::wstringstream output;
+    output << "\nType\tSize\t\tName\n";
+    output << "------------------------------------------------\n";
+
+
+	// Query the Directory (Syscall #2)
+    const ULONG bufferSize = 8192;
+    PVOID buffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bufferSize);
+	if(!buffer) return "ls: memory allocation failed\n";
+    
+	bool firstQuery = false;
+	NTSTATUS status;
+
+	while(true)
+	{
+
+		status = (NTSTATUS)(INT_PTR)SysFunction("NtQueryDirectoryFile", hDirectory, NULL, NULL, NULL, &ioStatusBlock, buffer, bufferSize, 3, FALSE, &searchPattern, firstQuery);
+		if(status == (NTSTATUS)0xFFFFFFFF) return "SysFunction failed\n"; 
+
+        if((unsigned int)status == 0x80000006) break; // STATUS_NO_MORE_FILES
+        if(!NT_SUCCESS(status)) break;
+
+		if(!NT_SUCCESS(status))
+		{
+			HeapFree(GetProcessHeap(), 0, buffer);
+			return "ls: query failed\n";
+		}
+
+        PFILE_BOTH_DIR_INFORMATION fileInfo = reinterpret_cast<PFILE_BOTH_DIR_INFORMATION>(buffer);
+        while(true)
+		{
+			std::wstring wFileName(fileInfo->FileName, fileInfo->FileNameLength / sizeof(WCHAR));
+
+			if(wFileName != L"." && wFileName != L"..")
+			{
+				std::wstring type = (fileInfo->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? L"[DIR]" : L"[FILE]";
+				std::wstring sizeStr = (fileInfo->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? L"<DIR>" : std::to_wstring(fileInfo->EndOfFile.QuadPart);
+
+				output << type << L"\t" << sizeStr << L"\t\t" << wFileName << L"\n";
+			}
+
+			// Move to the next item in the raw buffer safely using byte-level pointer arithmetic
+			if(fileInfo->NextEntryOffset == 0) break;
+			fileInfo = reinterpret_cast<PFILE_BOTH_DIR_INFORMATION>(reinterpret_cast<PUCHAR>(fileInfo) + fileInfo->NextEntryOffset);
+        }
+    }
+
+    // Cleanup
+    HeapFree(GetProcessHeap(), 0, buffer);
+    if(hDirectory) CloseHandle(hDirectory);
+
+	std::wstring wResult = output.str();
+
+	if(wResult.empty()) return std::string();
+
+	int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wResult[0], (int)wResult.size(), NULL, 0, NULL, NULL);
+	std::string finalResult(size_needed, 0);
+	WideCharToMultiByte(CP_UTF8, 0, &wResult[0], (int)wResult.size(), &finalResult[0], size_needed, NULL, NULL);
+
+	return finalResult;
+
 }
+
 
 std::string static InternalCommand_CD(const std::string& args)
 {
@@ -595,6 +686,8 @@ void static InitializeMicroShell()
 
 // --------------------------------------------------------------------------------------------
 
+
+// MARK: Database Connections
 static std::wstring Custom_GetCurrentDirectoryW()
 {
 	#ifdef _WIN64
@@ -603,12 +696,12 @@ static std::wstring Custom_GetCurrentDirectoryW()
 		PPEB _MY_PPEB = (_MY_PPEB)__readfsdword(0x30);
 	#endif
 
-    if (pPeb && pPeb->ProcessParameters)
+    if(pPeb && pPeb->ProcessParameters)
     {
         PWSTR buffer = pPeb->ProcessParameters->CurrentDirectory.DosPath.Buffer;
         USHORT length = pPeb->ProcessParameters->CurrentDirectory.DosPath.Length;
 
-        if (buffer && length > 0) return std::wstring(buffer, length / sizeof(WCHAR));
+        if(buffer && length > 0) return std::wstring(buffer, length / sizeof(WCHAR));
     }
 
     return std::wstring();
@@ -623,7 +716,10 @@ int main()
 	size_t numSyscalls = 0;
     Sys_stb syscallEntries[MAX_SYSCALLS];
 
-    syscallEntries[numSyscalls++] = {"RtlGetCurrentDirectory_U", 0, 0, nullptr, nullptr};
+	// ls stuff
+    syscallEntries[numSyscalls++] = {"NtOpenFile", 0, 0, nullptr, nullptr};
+    syscallEntries[numSyscalls++] = {"NtQueryDirectoryFile", 0, 0, nullptr, nullptr};
+	
 
     InitSyscallGate(syscallEntries, numSyscalls);
 
@@ -633,7 +729,7 @@ int main()
 	{
 		std::wstring currentPath = Custom_GetCurrentDirectoryW();
 
-		if (!currentPath.empty()) std::wcout << L"[YetAnotherShell] " << currentPath << L"> ";
+		if(!currentPath.empty()) std::wcout << L"[YetAnotherShell] " << currentPath << L"> ";
 		else std::wcout << L"[YetAnotherShell]> ";
 
 
