@@ -9,6 +9,8 @@
 
 #pragma comment(lib, "ntdll.lib")
 
+// --------------------------------------------------------------------------------------------
+
 typedef struct _MY_SYSTEM_PROCESS_INFORMATION 
 {
 	ULONG NextEntryOffset;
@@ -251,11 +253,18 @@ typedef struct _FILE_BOTH_DIR_INFORMATION
 } FILE_BOTH_DIR_INFORMATION, *PFILE_BOTH_DIR_INFORMATION;
 
 
-typedef std::string (*CommandRoutine)(const std::string& args);
-std::map<std::string, CommandRoutine> g_CommandMap;
+typedef std::wstring (*CommandRoutine)(const std::wstring& args);
+std::map<std::wstring, CommandRoutine> g_CommandMap;
 
 
-std::string static ExecuteMicroShell(std::string input_command);
+std::wstring static ExecuteMicroShell(std::wstring input_command);
+
+// --------------------------------------------------------------------------------------------
+
+#pragma region Globals
+
+
+#pragma endregion
 
 // --------------------------------------------------------------------------------------------
 
@@ -268,19 +277,19 @@ std::string static ExecuteMicroShell(std::string input_command);
 
 #pragma region I/O
 
-std::string static GetCommand()
+std::wstring static GetCommand()
 {
-	std::string inputBuffer = "";
-	std::getline(std::cin, inputBuffer);
+	std::wstring inputBuffer = L"";
+	std::getline(std::wcin, inputBuffer);
 
 	return inputBuffer;
 }
 
 
-void static send_output(std::string output)
+void static send_output(std::wstring output)
 {
 
-	std::cout << output << std::endl;
+	std::wcout << output << std::endl;
 }
 
 #pragma endregion
@@ -289,35 +298,35 @@ void static send_output(std::string output)
 
 #pragma region Commands
 
-std::string static InternalCommand_LS(const std::string& args)
+std::wstring static InternalCommand_LS(const std::wstring& args)
 {
 
-	std::string searchPath = args.empty() ? "." : args;
-	std::string wildcard = "*";
+	std::wstring searchPath = args.empty() ? L"." : args;
+	std::wstring wildcard = L"*";
 
 	// If the user provided a wildcard, we extract it
-    size_t lastSlash = searchPath.find_last_of("\\/");
-    if(lastSlash != std::string::npos)
+    size_t lastSlash = searchPath.find_last_of(L"\\/");
+    if(lastSlash != std::wstring::npos)
 	{
         // Check if there is a wildcard after the last slash
-        if(searchPath.find('*', lastSlash) != std::string::npos || searchPath.find('?', lastSlash) != std::string::npos)
+        if(searchPath.find('*', lastSlash) != std::wstring::npos || searchPath.find('?', lastSlash) != std::wstring::npos)
 		{
             wildcard = searchPath.substr(lastSlash + 1);
             searchPath = searchPath.substr(0, lastSlash);
-            if (searchPath.empty()) searchPath = "\\"; // Handle root drive edge case
+            if (searchPath.empty()) searchPath = L"\\"; // Handle root drive edge case
         }
     }
-	else if(searchPath.find('*') != std::string::npos || searchPath.find('?') != std::string::npos)
+	else if(searchPath.find('*') != std::wstring::npos || searchPath.find('?') != std::wstring::npos)
 	{
-        // Only a wildcard was provided (e.g., "*.txt")
+        // Only a wildcard was provided (e.g., L"*.txt")
         wildcard = searchPath;
-        searchPath = ".";
+        searchPath = L".";
 	}
 
-	char absPath[MAX_PATH];
-	GetFullPathNameA(searchPath.c_str(), MAX_PATH, absPath, NULL);
+	wchar_t absPath[MAX_PATH];
+	GetFullPathNameW(searchPath.c_str(), MAX_PATH, absPath, NULL);
 
-	std::string ntPathStr = "\\??\\" + std::string(absPath);
+	std::wstring ntPathStr = L"\\??\\" + std::wstring(absPath);
 	std::wstring wNtPath(ntPathStr.begin(), ntPathStr.end());
 	std::wstring wWildcard(wildcard.begin(), wildcard.end());
 
@@ -332,17 +341,17 @@ std::string static InternalCommand_LS(const std::string& args)
 
 
     NTSTATUS sysstatus = (NTSTATUS)(INT_PTR)SysFunction("NtOpenFile", &hDirectory, 0x100001, &objAttr, &ioStatusBlock, FILE_SHARE_READ | FILE_SHARE_WRITE, 0x4021);
-	if(!NT_SUCCESS(sysstatus)) return "ls: cannot access '" + args + "': No such file or directory\n";
+	if(!NT_SUCCESS(sysstatus)) return L"ls: cannot access '" + args + L"': No such file or directory\n";
 
 	std::wstringstream output;
-    output << "\nType\tSize\t\tName\n";
-    output << "------------------------------------------------\n";
+    output << L"\nType\tSize\t\tName\n";
+    output << L"------------------------------------------------\n";
 
 
 	// Query the Directory (Syscall #2)
     const ULONG bufferSize = 8192;
     PVOID buffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bufferSize);
-	if(!buffer) return "ls: memory allocation failed\n";
+	if(!buffer) return L"ls: memory allocation failed\n";
     
 	bool firstQuery = false;
 	NTSTATUS status;
@@ -351,7 +360,7 @@ std::string static InternalCommand_LS(const std::string& args)
 	{
 
 		status = (NTSTATUS)(INT_PTR)SysFunction("NtQueryDirectoryFile", hDirectory, NULL, NULL, NULL, &ioStatusBlock, buffer, bufferSize, 3, FALSE, &searchPattern, firstQuery);
-		if(status == (NTSTATUS)0xFFFFFFFF) return "SysFunction failed\n"; 
+		if(status == (NTSTATUS)0xFFFFFFFF) return L"SysFunction failed\n"; 
 
         if((unsigned int)status == 0x80000006) break; // STATUS_NO_MORE_FILES
         if(!NT_SUCCESS(status)) break;
@@ -359,13 +368,13 @@ std::string static InternalCommand_LS(const std::string& args)
 		if(!NT_SUCCESS(status))
 		{
 			HeapFree(GetProcessHeap(), 0, buffer);
-			return "ls: query failed\n";
+			return L"ls: query failed\n";
 		}
 
         PFILE_BOTH_DIR_INFORMATION fileInfo = reinterpret_cast<PFILE_BOTH_DIR_INFORMATION>(buffer);
         while(true)
 		{
-			std::wstring wFileName(fileInfo->FileName, fileInfo->FileNameLength / sizeof(WCHAR));
+			std::wstring wFileName(fileInfo->FileName, fileInfo->FileNameLength / sizeof(wchar_t));
 
 			if(wFileName != L"." && wFileName != L"..")
 			{
@@ -382,39 +391,31 @@ std::string static InternalCommand_LS(const std::string& args)
     }
 
     // Cleanup
-    HeapFree(GetProcessHeap(), 0, buffer);
+	HeapFree(GetProcessHeap(), 0, buffer);
     if(hDirectory) CloseHandle(hDirectory);
 
-	std::wstring wResult = output.str();
-
-	if(wResult.empty()) return std::string();
-
-	int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wResult[0], (int)wResult.size(), NULL, 0, NULL, NULL);
-	std::string finalResult(size_needed, 0);
-	WideCharToMultiByte(CP_UTF8, 0, &wResult[0], (int)wResult.size(), &finalResult[0], size_needed, NULL, NULL);
-
-	return finalResult;
+    std::wstring wResult = output.str();
+    return wResult;
 
 }
 
-
-std::string static InternalCommand_CD(const std::string& args)
+std::wstring static InternalCommand_CD(const std::wstring& args)
 {
 
-	if(args == "") return "cd requires arguments.";
+	if(args == L"") return L"cd requires arguments.";
 
-	BOOL status = SetCurrentDirectoryA(args.c_str());
-	if(status != TRUE) return "Error: Failed to change directory to '" + args + "'.\n";
+	BOOL status = SetCurrentDirectoryW(args.c_str());
+	if(status != TRUE) return L"Error: Failed to change directory to '" + args + L"'.\n";
 
-	return "";
+	return L"";
 }
 
-std::string static InternalCommand_WHOAMI(const std::string& args)
+std::wstring static InternalCommand_WHOAMI(const std::wstring& args)
 {
 	HANDLE hToken = NULL;
 	
 	// Open the access token associated with the current process
-	if(!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) return "Error: Failed to open process token.\n";
+	if(!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) return L"Error: Failed to open process token.\n";
 
 	// To get the required buffer size
 	// This will intentionally fail with ERROR_INSUFFICIENT_BUFFER, but populate dwSize
@@ -429,39 +430,39 @@ std::string static InternalCommand_WHOAMI(const std::string& args)
 	if(!GetTokenInformation(hToken, TokenUser, pTokenUser, dwSize, &dwSize))
 	{
 		CloseHandle(hToken);
-		return "Error: Failed to extract TokenUser information.\n";
+		return L"Error: Failed to extract TokenUser information.\n";
 	}
 
 	// We now have the SID. We need to translate it to Domain\User
-	char userName[256];
-	DWORD userNameSize = sizeof(userName);
+	wchar_t userName[256];
+	DWORD userNameSize = ARRAYSIZE(userName);
 	
-	char domainName[256];
-	DWORD domainNameSize = sizeof(domainName);
+	wchar_t domainName[256];
+	DWORD domainNameSize = ARRAYSIZE(domainName);
 	
 	SID_NAME_USE sidType;
 
 	// LookupAccountSidA contacts the local SAM database or Domain Controller to resolve the SID
-	if(!LookupAccountSidA(NULL, pTokenUser->User.Sid, userName, &userNameSize, domainName, &domainNameSize, &sidType))
+	if(!LookupAccountSidW(NULL, pTokenUser->User.Sid, userName, &userNameSize, domainName, &domainNameSize, &sidType))
 	{
 		CloseHandle(hToken);
-		return "Error: Failed to resolve SID to account name.\n";
+		return L"Error: Failed to resolve SID to account name.\n";
 	}
 
 	CloseHandle(hToken);
-	return std::string(domainName) + "\\" + std::string(userName) + "\n";
+	return std::wstring(domainName) + L"\\" + std::wstring(userName) + L"\n";
 }
 
-std::string static InternalCommand_PS(const std::string& args)
+std::wstring static InternalCommand_PS(const std::wstring& args)
 {
 
-	std::stringstream output;
+	std::wstringstream output;
 
 	ULONG bufferSize = 1024 * 1024; 
 	PVOID buffer = VirtualAlloc(NULL, bufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 	if(buffer == NULL)
 	{
-		return "Error: Initial VirtualAlloc failed.\n";
+		return L"Error: Initial VirtualAlloc failed.\n";
 	}
 
 	NTSTATUS status;
@@ -476,7 +477,7 @@ std::string static InternalCommand_PS(const std::string& args)
 			buffer = VirtualAlloc(NULL, bufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 			if(buffer == NULL)
 			{
-				return "Error: Reallocation VirtualAlloc failed.\n";
+				return L"Error: Reallocation VirtualAlloc failed.\n";
 			}
 		}
 
@@ -485,7 +486,7 @@ std::string static InternalCommand_PS(const std::string& args)
 
 	if(!NT_SUCCESS(status))
 	{
-		output << "Error: NtQuerySystemInformation failed with status " << std::hex << status << "\n";
+		output << L"Error: NtQuerySystemInformation failed with status L" << std::hex << status << L"\n";
 
 		if(buffer != NULL) VirtualFree(buffer, 0, MEM_RELEASE);
 		return output.str();
@@ -494,31 +495,21 @@ std::string static InternalCommand_PS(const std::string& args)
 
 	PMY_SYSTEM_PROCESS_INFORMATION pInfo = (PMY_SYSTEM_PROCESS_INFORMATION)buffer;
 		
-	output << "PID\tPPID\tName\n";
-	output << "----------------------------------------\n";
+	output << L"PID\tPPID\tName\n";
+	output << L"----------------------------------------\n";
 
 	while(true)
 	{
 		DWORD pid = (DWORD)(ULONG_PTR)pInfo->UniqueProcessId;
 		DWORD ppid = (DWORD)(ULONG_PTR)pInfo->InheritedFromUniqueProcessId;
 			
-		std::string procName = "[System or Unknown]";
+		std::wstring procName = L"[System or Unknown]";
 		
-		if(pInfo->ImageName.Buffer != NULL)
-		{
-			int size_needed = WideCharToMultiByte(CP_UTF8, 0, pInfo->ImageName.Buffer, (int)(pInfo->ImageName.Length / sizeof(WCHAR)), NULL, 0, NULL, NULL);
-			std::string convertedName(size_needed, 0);
-			WideCharToMultiByte(CP_UTF8, 0, pInfo->ImageName.Buffer, (int)(pInfo->ImageName.Length / sizeof(WCHAR)), &convertedName[0], size_needed, NULL, NULL);
-			
-			procName = convertedName;
-		}
+		if(pInfo->ImageName.Buffer != NULL) procName = std::wstring(pInfo->ImageName.Buffer, pInfo->ImageName.Length / sizeof(wchar_t));
 
-		output << pid << "\t" << ppid << "\t" << procName << "\n";
+		output << pid << L"\t" << ppid << L"\t" << procName << L"\n";
 
-		if(pInfo->NextEntryOffset == 0)
-		{
-			break;
-		}
+		if(pInfo->NextEntryOffset == 0) break;
 			
 		pInfo = (PMY_SYSTEM_PROCESS_INFORMATION)((PUCHAR)pInfo + pInfo->NextEntryOffset);
 	}
@@ -529,40 +520,40 @@ std::string static InternalCommand_PS(const std::string& args)
 
 }
 
-std::string static InternalCommand_MKDIR(const std::string& args)
+std::wstring static InternalCommand_MKDIR(const std::wstring& args)
 {
-	if(args.empty()) return "Error: mkdir requires a directory name.\n";
+	if(args.empty()) return L"Error: mkdir requires a directory name.\n";
 
-	if(CreateDirectoryA(args.c_str(), nullptr)) return "Directory created: " + args + "\n";
+	if(CreateDirectoryW(args.c_str(), nullptr)) return L"Directory created: " + args + L"\n";
 	
-	return "Error: Failed to create directory. Code: " + std::to_string(GetLastError()) + "\n";
+	return L"Error: Failed to create directory. Code: L" + std::to_wstring(GetLastError()) + L"\n";
 }
 
-std::string static InternalCommand_RM(const std::string& args)
+std::wstring static InternalCommand_RM(const std::wstring& args)
 {
-	if(args.empty()) return "Error: rm requires a file name.\n";
+	if(args.empty()) return L"Error: rm requires a file name.\n";
 
-	if(DeleteFileA(args.c_str())) return "File deleted: " + args + "\n";
+	if(DeleteFileW(args.c_str())) return L"File deleted: " + args + L"\n";
 	
-	return "Error: Failed to delete file. Code: " + std::to_string(GetLastError()) + "\n";
+	return L"Error: Failed to delete file. Code: " + std::to_wstring(GetLastError()) + L"\n";
 }
 
-std::string static InternalCommand_EXEC(const std::string& args)
+std::wstring static InternalCommand_EXEC(const std::wstring& args)
 {
-	if(args.empty()) return "Error: exec requires a target executable.\n";
+	if(args.empty()) return L"Error: exec requires a target executable.\n";
 
-	std::string command = args;
+	std::wstring command = args;
 	DWORD targetPid = 0;
 
 	// Parse arguments to see if a PID was provided at the end
 	size_t lastSpace = args.find_last_of(' ');
-	if(lastSpace != std::string::npos)
+	if(lastSpace != std::wstring::npos)
 	{
-		std::string possiblePid = args.substr(lastSpace + 1);
+		std::wstring possiblePid = args.substr(lastSpace + 1);
 		bool isNumeric = true;
 		
-		// Verify every character in the last token is a digit
-		for(char c : possiblePid)
+		// Verify every wchar_tacter in the last token is a digit
+		for(wchar_t c : possiblePid)
 		{
 			if(!isdigit(c))
 			{
@@ -577,37 +568,37 @@ std::string static InternalCommand_EXEC(const std::string& args)
 			command = args.substr(0, lastSpace);
 			
 			// Clean up any trailing whitespace from the command string
-			command.erase(command.find_last_not_of(" \n\r\t") + 1);
+			command.erase(command.find_last_not_of(L" \n\r\t") + 1);
 		}
 	}
 
 	// Safely copy the command string into a writable buffer for the Windows API
-	std::vector<char> cmdline(command.begin(), command.end());
+	std::vector<wchar_t> cmdline(command.begin(), command.end());
 	cmdline.push_back('\0');
 
 	if(targetPid == 0)
 	{
 		// --- NORMAL CREATION ---
-		STARTUPINFOA si;
+		STARTUPINFOW si;
 		PROCESS_INFORMATION pi;
 		
 		ZeroMemory(&si, sizeof(si));
 		si.cb = sizeof(si);
 		ZeroMemory(&pi, sizeof(pi));
 
-		if(CreateProcessA(NULL, cmdline.data(), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+		if(CreateProcessW(NULL, cmdline.data(), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
 		{
 			CloseHandle(pi.hProcess);
 			CloseHandle(pi.hThread);
-			return "[+] Process started normally: '" + command + "'\n";
+			return L"[+] Process started normally: '" + command + L"'\n";
 		}
-		else return "[-] Error: Normal execution failed. Code: " + std::to_string(GetLastError()) + "\n";
+		else return L"[-] Error: Normal execution failed. Code: " + std::to_wstring(GetLastError()) + L"\n";
 	}
 	else
 	{
 		// --- SPOOFED CREATION (PID provided) ---
 		HANDLE hParent = OpenProcess(PROCESS_CREATE_PROCESS, FALSE, targetPid);
-		if(hParent == NULL) return "[-] Error: Failed to open Parent PID " + std::to_string(targetPid) + ". Code: " + std::to_string(GetLastError()) + "\n";
+		if(hParent == NULL) return L"[-] Error: Failed to open Parent PID " + std::to_wstring(targetPid) + L". Code: " + std::to_wstring(GetLastError()) + L"\n";
 
 		SIZE_T attributeSize = 0;
 		InitializeProcThreadAttributeList(NULL, 1, 0, &attributeSize);
@@ -616,14 +607,14 @@ std::string static InternalCommand_EXEC(const std::string& args)
 		if(pAttributeList == NULL)
 		{
 			CloseHandle(hParent);
-			return "[-] Error: Failed to allocate Attribute List.\n";
+			return L"[-] Error: Failed to allocate Attribute List.\n";
 		}
 
 		if(!InitializeProcThreadAttributeList(pAttributeList, 1, 0, &attributeSize))
 		{
 			HeapFree(GetProcessHeap(), 0, pAttributeList);
 			CloseHandle(hParent);
-			return "[-] Error: Failed to initialize Attribute List.\n";
+			return L"[-] Error: Failed to initialize Attribute List.\n";
 		}
 
 		if(!UpdateProcThreadAttribute(pAttributeList, 0, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, &hParent, sizeof(HANDLE), NULL, NULL))
@@ -631,10 +622,10 @@ std::string static InternalCommand_EXEC(const std::string& args)
 			DeleteProcThreadAttributeList(pAttributeList);
 			HeapFree(GetProcessHeap(), 0, pAttributeList);
 			CloseHandle(hParent);
-			return "[-] Error: Failed to update Attribute List.\n";
+			return L"[-] Error: Failed to update Attribute List.\n";
 		}
 
-		STARTUPINFOEXA siex;
+		STARTUPINFOEXW siex;
 		PROCESS_INFORMATION pi;
 		
 		ZeroMemory(&siex, sizeof(siex));
@@ -642,7 +633,7 @@ std::string static InternalCommand_EXEC(const std::string& args)
 		siex.lpAttributeList = pAttributeList;
 		ZeroMemory(&pi, sizeof(pi));
 
-		BOOL success = CreateProcessA(NULL, cmdline.data(), NULL, NULL, FALSE, EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, NULL, NULL, &siex.StartupInfo, &pi);
+		BOOL success = CreateProcessW(NULL, cmdline.data(), NULL, NULL, FALSE, EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, NULL, NULL, &siex.StartupInfo, &pi);
 
 		DeleteProcThreadAttributeList(pAttributeList);
 		HeapFree(GetProcessHeap(), 0, pAttributeList);
@@ -652,33 +643,33 @@ std::string static InternalCommand_EXEC(const std::string& args)
 		{
 			CloseHandle(pi.hProcess);
 			CloseHandle(pi.hThread);
-			return "[+] Process spoofed successfully: '" + command + "' as child of PID " + std::to_string(targetPid) + "\n";
+			return L"[+] Process spoofed successfully: '" + command + L"' as child of PID " + std::to_wstring(targetPid) + L"\n";
 		}
-		else return "[-] Error: Spoofed execution failed. Code: " + std::to_string(GetLastError()) + "\n";
+		else return L"[-] Error: Spoofed execution failed. Code: " + std::to_wstring(GetLastError()) + L"\n";
 	}
 }
 
-std::string static InternalCommand_RMDIR(const std::string& args)
+std::wstring static InternalCommand_RMDIR(const std::wstring& args)
 {
-	if(args.empty()) return "Error: rmdir requires a directory name.\n";
+	if(args.empty()) return L"Error: rmdir requires a directory name.\n";
 
-	if(RemoveDirectoryA(args.c_str())) return "Directory removed: " + args + "\n";
+	if(RemoveDirectoryW(args.c_str())) return L"Directory removed: " + args + L"\n";
 	
-	return "Error: Failed to remove directory. Code: " + std::to_string(GetLastError()) + "\n";
+	return L"Error: Failed to remove directory. Code: L" + std::to_wstring(GetLastError()) + L"\n";
 }
 
 
 void static InitializeMicroShell()
 {
-	g_CommandMap["ls"] = InternalCommand_LS;
-	g_CommandMap["dir"] = InternalCommand_LS;
-	g_CommandMap["cd"] = InternalCommand_CD;
-	g_CommandMap["ps"] = InternalCommand_PS;
-	g_CommandMap["whoami"] = InternalCommand_WHOAMI;
-	g_CommandMap["mkdir"] = InternalCommand_MKDIR;
-	g_CommandMap["rmdir"] = InternalCommand_RMDIR;
-	g_CommandMap["rm"] = InternalCommand_RM;
-	g_CommandMap["run"] = InternalCommand_EXEC;
+	g_CommandMap[L"ls"] = InternalCommand_LS;
+	g_CommandMap[L"dir"] = InternalCommand_LS;
+	g_CommandMap[L"cd"] = InternalCommand_CD;
+	g_CommandMap[L"ps"] = InternalCommand_PS;
+	g_CommandMap[L"whoami"] = InternalCommand_WHOAMI;
+	g_CommandMap[L"mkdir"] = InternalCommand_MKDIR;
+	g_CommandMap[L"rmdir"] = InternalCommand_RMDIR;
+	g_CommandMap[L"rm"] = InternalCommand_RM;
+	g_CommandMap[L"run"] = InternalCommand_EXEC;
 	// to add: something to send and get raw data
 }
 
@@ -724,7 +715,6 @@ int main()
     InitSyscallGate(syscallEntries, numSyscalls);
 
 
-
 	while(true)
 	{
 		std::wstring currentPath = Custom_GetCurrentDirectoryW();
@@ -733,13 +723,13 @@ int main()
 		else std::wcout << L"[YetAnotherShell]> ";
 
 
-		std::string recieved_command = GetCommand();
+		std::wstring recieved_command = GetCommand();
 		if(recieved_command.empty()) continue;
 		
 		
-		if(recieved_command == "exit" || recieved_command == "quit") break;
+		if(recieved_command == L"exit" || recieved_command == L"quit") break;
 
-		std::string output = ExecuteMicroShell(recieved_command);
+		std::wstring output = ExecuteMicroShell(recieved_command);
 		send_output(output);
 	}
 
@@ -747,21 +737,21 @@ int main()
 }
 
 
-std::string static ExecuteMicroShell(std::string input_command)
+std::wstring static ExecuteMicroShell(std::wstring input_command)
 {
-	if(input_command.empty()) return "";
+	if(input_command.empty()) return L"";
 
 	size_t spacePos = input_command.find(' ');
-	std::string command = input_command.substr(0, spacePos);
-	std::string args = "";
+	std::wstring command = input_command.substr(0, spacePos);
+	std::wstring args = L"";
 	
-	if(spacePos != std::string::npos) args = input_command.substr(spacePos + 1);
+	if(spacePos != std::wstring::npos) args = input_command.substr(spacePos + 1);
 
 	// Strip trailing whitespace, newlines, and carriage returns
-	command.erase(command.find_last_not_of(" \n\r\t") + 1);
-	if(!args.empty()) args.erase(args.find_last_not_of(" \n\r\t") + 1);
+	command.erase(command.find_last_not_of(L" \n\r\t") + 1);
+	if(!args.empty()) args.erase(args.find_last_not_of(L" \n\r\t") + 1);
 
 	// Dispatch execution
 	if(g_CommandMap.find(command) != g_CommandMap.end()) return g_CommandMap[command](args);
-	else return "YetAnotherShell Error: Unrecognized internal command '" + command + "'.\n";
+	else return L"YetAnotherShell Error: Unrecognized internal command '" + command + L"'.\n";
 }
