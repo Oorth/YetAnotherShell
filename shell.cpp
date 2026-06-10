@@ -31,6 +31,8 @@
         } \
     } while (0)
 
+#define KUSER_SHARED_DATA_ADDRESS 0x7FFE0000
+#define SHARED_DATA_OFFSET_2DC (*(volatile ULONG*)(KUSER_SHARED_DATA_ADDRESS + 0x2DC))
 
 // --------------------------------------------------------------------------------------------
 
@@ -59,7 +61,7 @@ struct _MY_CURDIR
 }; 
 
 //0x448 bytes (sizeof)
-struct _MY_RTL_USER_PROCESS_PARAMETERS
+typedef struct _MY_RTL_USER_PROCESS_PARAMETERS
 {
     ULONG MaximumLength;                                                    //0x0
     ULONG Length;                                                           //0x4
@@ -100,7 +102,7 @@ struct _MY_RTL_USER_PROCESS_PARAMETERS
     ULONG DefaultThreadpoolCpuSetMaskCount;                                 //0x438
     ULONG DefaultThreadpoolThreadMaximum;                                   //0x43c
     ULONG HeapMemoryTypeMask;                                               //0x440
-}; 
+} MY_RTL_USER_PROCESS_PARAMETERS, *PMY_RTL_USER_PROCESS_PARAMETERS; 
 
 //0x7d0 bytes (sizeof)
 typedef struct _MY_PEB
@@ -255,7 +257,7 @@ typedef struct _MY_PEB
     };
     ULONG NtGlobalFlag2;                                                    //0x7c4
     ULONGLONG ExtendedFeatureDisableMask;                                   //0x7c8
-} _MY_PEB, *_MY_PPEB; 
+} MY_PEB, *PMY_PEB; 
 
 typedef struct _FILE_BOTH_DIR_INFORMATION
 {
@@ -304,12 +306,72 @@ typedef struct _MY_LDR_DATA_TABLE_ENTRY
     UNICODE_STRING BaseDllName;
 } MY_LDR_DATA_TABLE_ENTRY, *PMY_LDR_DATA_TABLE_ENTRY;  
 
+//typedef struct _CURDIR_REF
+//{
+//    LONG   ReferenceCount;         // 0x00: Reference Count (*_DWORD = 1)
+//    HANDLE Handle;                 // 0x08: Directory Handle
+//    PVOID  Unknown1;               // 0x10: KUSER_SHARED_DATA value
+//    ULONG  Padding1;               // 0x14: Alignment
+//    USHORT Length;                 // 0x18: Current string length
+//    USHORT MaximumLength;          // 0x1A: Max buffer length
+//    ULONG  Padding2;               // 0x1C: Alignment
+//    PWSTR  Buffer;                 // 0x20: Pointer to the string
+//    ULONG  DeviceCharacteristics;  // 0x28: From ZwQueryVolumeInformationFile
+//    ULONG  Padding3;               // 0x2C: Alignment
+//    // WCHAR Path[ANYSIZE_ARRAY];  // 0x30 (48): Appended path buffer
+//} CURDIR_REF, *PCURDIR_REF;
+
+typedef struct _CURDIR_REF
+{
+    LONG ReferenceCount;         // 0x00
+    HANDLE Handle;               // 0x08
+    PVOID Unknown1;              // 0x10
+    UNICODE_STRING DosPath;      // 0x18
+} CURDIR_REF, *PCURDIR_REF;
+
+
+typedef struct _FILE_FS_DEVICE_INFORMATION
+{
+  DEVICE_TYPE DeviceType;
+  ULONG       Characteristics;
+} FILE_FS_DEVICE_INFORMATION, *PFILE_FS_DEVICE_INFORMATION;
+
+typedef enum _FSINFOCLASS
+{
+  FileFsVolumeInformation,
+  FileFsLabelInformation,
+  FileFsSizeInformation,
+  FileFsDeviceInformation,
+  FileFsAttributeInformation,
+  FileFsControlInformation,
+  FileFsFullSizeInformation,
+  FileFsObjectIdInformation,
+  FileFsDriverPathInformation,
+  FileFsVolumeFlagsInformation,
+  FileFsSectorSizeInformation,
+  FileFsDataCopyInformation,
+  FileFsMetadataSizeInformation,
+  FileFsFullSizeInformationEx,
+  FileFsGuidInformation,
+  FileFsMaximumInformation
+} FS_INFORMATION_CLASS, *PFS_INFORMATION_CLASS;
 
 // --------------------------------------------------------------------------------------------
 
 typedef std::wstring (*CommandRoutine)(const std::wstring& args);
 typedef HMODULE(WINAPI* pfnLoadLibraryA)(LPCSTR lpLibFileName);
 
+
+typedef NTSTATUS(NTAPI* pfnRtlInitUnicodeStringEx)(PUNICODE_STRING DestinationString, PCWSTR SourceString);
+typedef PVOID(NTAPI* pfnRtlAllocateHeap)(PVOID HeapHandle, ULONG Flags, SIZE_T Size);
+typedef BOOL(NTAPI* pfnRtlFreeHeap)(PVOID HeapHandle, ULONG Flags, PVOID BaseAddress);
+typedef VOID(NTAPI* pfnRtlCopyUnicodeString)(PUNICODE_STRING  DestinationString, PCUNICODE_STRING SourceString);
+typedef PVOID(NTAPI* pfnRtlAcquirePebLock)(VOID);
+typedef PVOID(NTAPI* pfnRtlReleasePebLock)(VOID);
+typedef NTSTATUS(NTAPI* pfnRtlGetFullPathName_UstrEx)(PUNICODE_STRING FileName, PUNICODE_STRING StaticString, PUNICODE_STRING DynamicString, PUNICODE_STRING *StringUsed, PSIZE_T FilePartPrefixCch, PBOOLEAN NameInvalid, PULONG InputPathType,PSIZE_T BytesRequired);
+typedef NTSTATUS(NTAPI* pfnRtlDosPathNameToNtPathName_U_WithStatus)(PWSTR DosFileName, PUNICODE_STRING NtFileName, PWSTR *FilePart, PVOID RelativeName);
+typedef NTSTATUS(NTAPI* pfnZwQueryVolumeInformationFile)(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PVOID FsInformation, ULONG Length, FS_INFORMATION_CLASS FsInformationClass);
+// --------------------------------------------------------------------------------------------
 
 std::wstring static ExecuteMicroShell(std::wstring input_command);
 
@@ -319,9 +381,19 @@ std::wstring static ExecuteMicroShell(std::wstring input_command);
 
 std::map<std::wstring, CommandRoutine> g_CommandMap;
 
-
 static const WCHAR g_hexChars[] = L"0123456789ABCDEF";
 static WCHAR g_shellcodeLogBuffer[256];
+
+pfnLoadLibraryA my_LoadLibraryA = nullptr;
+pfnRtlInitUnicodeStringEx my_RtlInitUnicodeStringEx = nullptr;
+pfnRtlAllocateHeap my_RtlAllocateHeap = nullptr;
+pfnRtlFreeHeap my_RtlFreeHeap = nullptr;
+pfnRtlCopyUnicodeString my_RtlCopyUnicodeString = nullptr;
+pfnRtlAcquirePebLock my_RtlAcquirePebLock = nullptr;
+pfnRtlReleasePebLock my_RtlReleasePebLock = nullptr;
+pfnRtlGetFullPathName_UstrEx my_RtlGetFullPathName_UstrEx = nullptr;
+pfnRtlDosPathNameToNtPathName_U_WithStatus my_RtlDosPathNameToNtPathName_U_WithStatus = nullptr;
+pfnZwQueryVolumeInformationFile my_ZwQueryVolumeInformationFile = nullptr;
 
 #pragma endregion
 
@@ -507,7 +579,7 @@ static int __cdecl ShellcodeSprintfW(LPWSTR pszDest, size_t cchDest, LPCWSTR psz
                             remaining--;
                         }
                     }
-                    // else if (*(pFmt + 1) == L'u') // handle %hu
+                    // else if(*(pFmt + 1) == L'u') // handle %hu
                     // {
                     //     pFmt++; // consume 'u'
                     //     unsigned short val = (unsigned short)va_arg(args, unsigned int);
@@ -613,7 +685,7 @@ static void* __stdcall ShellcodeFindExportAddress(HMODULE hModule, LPCSTR lpProc
     if(nt->Signature != IMAGE_NT_SIGNATURE) return nullptr;
 
     IMAGE_DATA_DIRECTORY* pExportDataDir = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT]; // Use a pointer for clarity
-    if (pExportDataDir->VirtualAddress == 0 || pExportDataDir->Size == 0) return nullptr;
+    if(pExportDataDir->VirtualAddress == 0 || pExportDataDir->Size == 0) return nullptr;
 
     IMAGE_EXPORT_DIRECTORY* exp = (IMAGE_EXPORT_DIRECTORY*)(base + pExportDataDir->VirtualAddress);
     DWORD* functions = (DWORD*)(base + exp->AddressOfFunctions); // RVAs to function bodies or forwarders
@@ -625,7 +697,7 @@ static void* __stdcall ShellcodeFindExportAddress(HMODULE hModule, LPCSTR lpProc
     WORD ordinalToFind = 0;
 
     #if defined(_WIN64)
-        if (((ULONG_PTR)lpProcNameOrOrdinal >> 16) == 0)    // High bits of pointer are zero
+        if(((ULONG_PTR)lpProcNameOrOrdinal >> 16) == 0)    // High bits of pointer are zero
         {
             isOrdinalLookup = true;
             ordinalToFind = LOWORD((ULONG_PTR)lpProcNameOrOrdinal);
@@ -633,7 +705,7 @@ static void* __stdcall ShellcodeFindExportAddress(HMODULE hModule, LPCSTR lpProc
     #else // For 32-bit shellcode
         // For 32-bit, HIWORD macro is on a DWORD. ULONG_PTR might be 64-bit if compiled for x64 targeting x86.
         // Ensure lpProcNameOrOrdinal is treated as a 32-bit value for HIWORD.
-        if (HIWORD((DWORD)(ULONG_PTR)lpProcNameOrOrdinal) == 0)
+        if(HIWORD((DWORD)(ULONG_PTR)lpProcNameOrOrdinal) == 0)
         { 
             isOrdinalLookup = true;
             ordinalToFind = LOWORD((DWORD)(ULONG_PTR)lpProcNameOrOrdinal);
@@ -643,16 +715,16 @@ static void* __stdcall ShellcodeFindExportAddress(HMODULE hModule, LPCSTR lpProc
 
     DWORD funcRVA = 0; // RVA of the function/forwarder
 
-    if (isOrdinalLookup)
+    if(isOrdinalLookup)
     {
-        if (ordinalToFind < exp->Base || (ordinalToFind - exp->Base) >= exp->NumberOfFunctions)
+        if(ordinalToFind < exp->Base || (ordinalToFind - exp->Base) >= exp->NumberOfFunctions)
         {
             LOG_W(L"    [SFEA] Ordinal %hu is out of range (Base: %u, NumberOfFunctions: %u)", ordinalToFind, exp->Base, exp->NumberOfFunctions);
             return nullptr;
         }
             
         DWORD functionIndexInArray = ordinalToFind - exp->Base;
-        if (functionIndexInArray >= exp->NumberOfFunctions) return nullptr;
+        if(functionIndexInArray >= exp->NumberOfFunctions) return nullptr;
             
         funcRVA = functions[functionIndexInArray];
     }
@@ -660,7 +732,7 @@ static void* __stdcall ShellcodeFindExportAddress(HMODULE hModule, LPCSTR lpProc
     {
         // --- NAME LOOKUP PATH ---
         LPCSTR funcName = lpProcNameOrOrdinal;
-        if (!funcName || *funcName == '\0') return nullptr;
+        if(!funcName || *funcName == '\0') return nullptr;
 
         DWORD* nameRVAs = (DWORD*)(base + exp->AddressOfNames);          // RVAs to ASCII name strings
         WORD* nameOrdinals = (WORD*)(base + exp->AddressOfNameOrdinals); // Indices into the 'functions' array (NOT necessarily the export ordinals themselves)
@@ -670,19 +742,19 @@ static void* __stdcall ShellcodeFindExportAddress(HMODULE hModule, LPCSTR lpProc
         {
             char* currentExportName = (char*)(base + nameRVAs[i]);
             
-            if (isSame(currentExportName, funcName)) 
+            if(isSame(currentExportName, funcName)) 
             {
                 WORD functionIndexInArray = nameOrdinals[i];            //index into the 'functions' array
             
                 // Bounds check for the index obtained from nameOrdinals
-                if (functionIndexInArray >= exp->NumberOfFunctions)
+                if(functionIndexInArray >= exp->NumberOfFunctions)
                 {
                     LOG_W(L"Name '%hs' gave an ordinal array index %hu out of bounds (%u).", funcName, functionIndexInArray, exp->NumberOfFunctions);
                     return nullptr;
                 }
 
                 funcRVA = functions[functionIndexInArray];
-                if (funcRVA == 0) return nullptr; // Should not happen for a named export pointing to a valid index
+                if(funcRVA == 0) return nullptr; // Should not happen for a named export pointing to a valid index
 
                 foundByName = true;
                 break;
@@ -696,7 +768,7 @@ static void* __stdcall ShellcodeFindExportAddress(HMODULE hModule, LPCSTR lpProc
         }
     }
 
-    if (funcRVA == 0)
+    if(funcRVA == 0)
     {
         LOG_W(L"RVA for %p in module 0x%p is zero.", lpProcNameOrOrdinal, hModule);
         return nullptr; // No valid RVA found
@@ -705,13 +777,13 @@ static void* __stdcall ShellcodeFindExportAddress(HMODULE hModule, LPCSTR lpProc
     BYTE* addr = base + funcRVA;
 
     // Check if this RVA points within the export directory itself (indicates a forwarded export)
-    if (funcRVA >= pExportDataDir->VirtualAddress && funcRVA < (pExportDataDir->VirtualAddress + pExportDataDir->Size)) 
+    if(funcRVA >= pExportDataDir->VirtualAddress && funcRVA < (pExportDataDir->VirtualAddress + pExportDataDir->Size)) 
     {
         // This is a forwarder string like "OTHERDLL.OtherFunction" or "OTHERDLL.#123" 
         char* originalForwarderString = (char*)addr; // The RVA points to this string
         LOG_W(L"    [SFEA] Proc %p from module 0x%p is forwarded to: '%hs'", lpProcNameOrOrdinal, hModule, originalForwarderString);
 
-        if (!pLoadLibraryAFunc)
+        if(!pLoadLibraryAFunc)
         {
             LOG_W(L"    [SFEA] pLoadLibraryAFunc is nullptr, cannot resolve forwarder for %hs", originalForwarderString);
             return nullptr;
@@ -734,23 +806,23 @@ static void* __stdcall ShellcodeFindExportAddress(HMODULE hModule, LPCSTR lpProc
 
         while (*tempParserPtr != '\0') 
         {
-            if (*tempParserPtr == '.')
+            if(*tempParserPtr == '.')
             {
                 dotSeparatorInLocal = tempParserPtr;
                 break;
             }
             ++tempParserPtr;
         }
-        if (!dotSeparatorInLocal || dotSeparatorInLocal == localForwarderBuffer) { LOG_W(L"    [SFEA] Malformed forwarder string (in copy): '%hs'", localForwarderBuffer); return nullptr; }
+        if(!dotSeparatorInLocal || dotSeparatorInLocal == localForwarderBuffer) { LOG_W(L"    [SFEA] Malformed forwarder string (in copy): '%hs'", localForwarderBuffer); return nullptr; }
 
 
         *dotSeparatorInLocal = '\0'; 
         char* forwardedFuncNameOrOrdinalStr = dotSeparatorInLocal + 1;
-        if (*forwardedFuncNameOrOrdinalStr == '\0') { LOG_W(L"    [SFEA] Malformed forwarder string (nothing after dot in copy): '%hs'", localForwarderBuffer); return nullptr; }
+        if(*forwardedFuncNameOrOrdinalStr == '\0') { LOG_W(L"    [SFEA] Malformed forwarder string (nothing after dot in copy): '%hs'", localForwarderBuffer); return nullptr; }
             
         char* forwardedDllName = localForwarderBuffer;
         HMODULE hForwardedModule = pLoadLibraryAFunc(forwardedDllName);
-        if (!hForwardedModule)
+        if(!hForwardedModule)
         {
             LOG_W(L"    [SFEA] Failed to load forwarded DLL: '%hs' (original forwarder was: '%hs')", forwardedDllName, originalForwarderString);
             return nullptr;
@@ -759,7 +831,7 @@ static void* __stdcall ShellcodeFindExportAddress(HMODULE hModule, LPCSTR lpProc
         LOG_W(L"    [SFEA] Successfully loaded forwarded DLL: '%hs' to 0x%p", forwardedDllName, (void*)hForwardedModule);
 
         LPCSTR finalProcNameToResolve;
-        if (*forwardedFuncNameOrOrdinalStr == '#') // Forwarding to an ordinal, e.g., "#123"
+        if(*forwardedFuncNameOrOrdinalStr == '#') // Forwarding to an ordinal, e.g., "#123"
         {
             WORD fwdOrdinal = 0;
             char* pNum = forwardedFuncNameOrOrdinalStr + 1; // Skip '#'
@@ -770,9 +842,9 @@ static void* __stdcall ShellcodeFindExportAddress(HMODULE hModule, LPCSTR lpProc
             }
 
             // Check if any digits were actually parsed for the ordinal
-            if (pNum == (forwardedFuncNameOrOrdinalStr + 1) && fwdOrdinal == 0)  // No digits after #, or #0 was not intended
+            if(pNum == (forwardedFuncNameOrOrdinalStr + 1) && fwdOrdinal == 0)  // No digits after #, or #0 was not intended
             {
-                if (*(forwardedFuncNameOrOrdinalStr + 1) != '0' || *(forwardedFuncNameOrOrdinalStr + 2) != '\0')    // Allow "#0" but not "#" or "#abc"
+                if(*(forwardedFuncNameOrOrdinalStr + 1) != '0' || *(forwardedFuncNameOrOrdinalStr + 2) != '\0')    // Allow "#0" but not "#" or "#abc"
                 {
                     LOG_W(L"    [SFEA] Invalid forwarded ordinal format (no valid number after #): %hs", forwardedFuncNameOrOrdinalStr);
                     return nullptr;
@@ -794,6 +866,238 @@ static void* __stdcall ShellcodeFindExportAddress(HMODULE hModule, LPCSTR lpProc
 }
 
 
+
+BOOLEAN static MyRtlpIsDosDeviceName_Ustr(PUNICODE_STRING PathName)
+{
+    if(!PathName || !PathName->Buffer || PathName->Length < 6)
+        return FALSE; // Too short to be a device like CON or COM1
+
+    // Extract the base name (strip folders if necessary, though CD usually gets clean paths)
+    // For a simple CD implementation, we just check if the exact target is a device
+    
+    LPCWSTR name = PathName->Buffer;
+    USHORT len = PathName->Length / sizeof(WCHAR);
+
+    // Check for 3-letter devices (CON, PRN, AUX, NUL)
+    if(len == 3 || (len == 4 && name[3] == L':')) 
+    {
+        if(_wcsnicmp(name, L"CON", 3) == 0 || _wcsnicmp(name, L"PRN", 3) == 0 || _wcsnicmp(name, L"AUX", 3) == 0 || _wcsnicmp(name, L"NUL", 3) == 0) 
+        {
+            return TRUE;
+        }
+    }
+    
+    // Check for 4-letter numbered devices (COM1-9, LPT1-9)
+    if(len == 4 || (len == 5 && name[4] == L':'))
+    {
+        if((_wcsnicmp(name, L"COM", 3) == 0 || _wcsnicmp(name, L"LPT", 3) == 0) && (name[3] >= L'1' && name[3] <= L'9'))
+        {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+NTSTATUS static MyRtlpCreateNewDirectoryReference(PCUNICODE_STRING DosPath, USHORT MaxBufferLength, PCURDIR_REF* OutDirRef)
+{
+
+#ifdef _WIN64
+    PMY_PEB pPeb = (PMY_PEB)__readgsqword(0x60);
+#else
+    PMY_PEB pPeb = (PMY_PEB)__readfsdword(0x30);
+#endif
+
+    NTSTATUS status;
+    UNICODE_STRING ntPath = { 0 };
+    OBJECT_ATTRIBUTES objAttr = { 0 };
+    HANDLE fileHandle = NULL;
+    IO_STATUS_BLOCK ioStatus = { 0 };
+    FILE_FS_DEVICE_INFORMATION deviceInfo = { 0 };
+    PCURDIR_REF dirRef = NULL;
+    
+    // RtlDosPathNameToNtPathName_U_WithStatus requires a null-terminated string,
+    // so we create a temporary buffer from the UNICODE_STRING input.
+    PWSTR tempDosPath = (PWSTR)my_RtlAllocateHeap(pPeb->ProcessHeap, 0, DosPath->Length + sizeof(WCHAR));
+    if(!tempDosPath) return STATUS_NO_MEMORY;
+
+    memcpy(tempDosPath, DosPath->Buffer, DosPath->Length);
+    tempDosPath[DosPath->Length / sizeof(WCHAR)] = L'\0';
+
+
+    status = my_RtlDosPathNameToNtPathName_U_WithStatus(tempDosPath, &ntPath, NULL, NULL);
+    my_RtlFreeHeap(pPeb->ProcessHeap, 0, tempDosPath);
+    if(!NT_SUCCESS(status))
+    {
+        wprintf(L"[DIR-DEBUG] RtlDosPathNameToNtPathName failed! Status: 0x%08X\n", status);
+        return status;
+    }
+
+
+    // Capture KUSER_SHARED_DATA value (MEMORY[0x7FFE02DC])
+    ULONG v7 = SHARED_DATA_OFFSET_2DC; 
+
+    // Open the directory
+    InitializeObjectAttributes(&objAttr, &ntPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+    status = NtOpenFile(&fileHandle, SYNCHRONIZE | FILE_TRAVERSE, &objAttr, &ioStatus, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    // Free the NT path buffer (Matches: RtlFreeHeap(..., *((_QWORD *)&v14 + 1)))
+    my_RtlFreeHeap(pPeb->ProcessHeap, 0, ntPath.Buffer);
+    if(!NT_SUCCESS(status))
+    {
+        wprintf(L"[DIR-DEBUG] NtOpenFile failed! Status: 0x%08X (objAttr.Length = %lu bytes)\n", status, objAttr.Length);
+        return status;
+    }
+
+
+    // Query Device Characteristics (Information Class 4)
+    status = my_ZwQueryVolumeInformationFile(fileHandle, &ioStatus, &deviceInfo, sizeof(deviceInfo), (FS_INFORMATION_CLASS)4);
+    if(!NT_SUCCESS(status))
+    {
+        wprintf(L"[DIR-DEBUG] ZwQueryVolumeInformationFile failed! Status: 0x%08X (sizeof deviceInfo = %llu bytes)\n", status, (unsigned long long)sizeof(deviceInfo));
+        NtClose(fileHandle);
+        return status;
+    }
+
+    // Allocate reverse-engineered structure (Header + String Size)
+    dirRef = (PCURDIR_REF)my_RtlAllocateHeap(pPeb->ProcessHeap, 0, MaxBufferLength + sizeof(CURDIR_REF));
+    if(!dirRef)
+    {
+        status = STATUS_NO_MEMORY;
+        NtClose(fileHandle);
+        return status;
+    }
+
+
+    memset(dirRef, 0, MaxBufferLength + sizeof(CURDIR_REF));
+
+    // Populate the structure
+    dirRef->ReferenceCount = 1;
+    dirRef->Handle = fileHandle;
+    
+    // Fill the 8-byte PVOID gap so DosPath lands perfectly at offset 0x18
+    dirRef->Unknown1 = (PVOID)(ULONG_PTR)v7; 
+    
+    // NTDLL reads this exactly at 0x18
+    dirRef->DosPath.Length = DosPath->Length;
+    dirRef->DosPath.MaximumLength = MaxBufferLength;
+    dirRef->DosPath.Buffer = (PWSTR)((PUCHAR)dirRef + sizeof(CURDIR_REF));
+
+    // Copy string into the appended buffer
+    memmove(dirRef->DosPath.Buffer, DosPath->Buffer, DosPath->Length);
+                
+    ULONG charCount = DosPath->Length / sizeof(WCHAR);
+
+    if(charCount > 0 && dirRef->DosPath.Buffer[charCount - 1] != L'\\')
+    {
+        dirRef->DosPath.Buffer[charCount] = L'\\';
+        dirRef->DosPath.Buffer[charCount + 1] = L'\0';
+        dirRef->DosPath.Length += sizeof(WCHAR);
+    }
+    else
+    {
+        dirRef->DosPath.Buffer[charCount] = L'\0';
+    }
+
+    *OutDirRef = dirRef;
+    return STATUS_SUCCESS;
+
+}
+
+NTSTATUS static MyRtlSetCurrentDirectory_U(PUNICODE_STRING PathName)
+{
+    PMY_PEB Peb = (PMY_PEB)NtCurrentTeb()->ProcessEnvironmentBlock;
+    PMY_RTL_USER_PROCESS_PARAMETERS ProcessParameters = Peb->ProcessParameters;
+    PVOID ProcessHeap = Peb->ProcessHeap;
+    
+    PCURDIR_REF NewDirRef = NULL;
+    NTSTATUS status;
+
+    // Check for invalid DOS device names (like CON, PRN)
+    if(MyRtlpIsDosDeviceName_Ustr(PathName)) 
+        return STATUS_OBJECT_NAME_INVALID;
+
+
+    WCHAR StackBuffer[MAX_PATH];
+    UNICODE_STRING StaticPath;
+    StaticPath.Buffer = StackBuffer;
+    StaticPath.Length = 0;
+    StaticPath.MaximumLength = sizeof(StackBuffer);
+
+    UNICODE_STRING DynamicPath = { 0 };
+    PUNICODE_STRING ResolvedPath = NULL;
+    ULONG inputPathType = 0;
+
+    status = my_RtlGetFullPathName_UstrEx(PathName, &StaticPath, &DynamicPath, &ResolvedPath, NULL, NULL, &inputPathType, NULL);
+    if(!NT_SUCCESS(status) || ResolvedPath == NULL)
+    {
+        wprintf(L"[DEBUG] RtlGetFullPathName_UstrEx failed! Status: 0x%08X\n", status);
+        return status != 0 ? status : STATUS_OBJECT_NAME_INVALID;
+    }
+
+    // Strip the trailing backslash so 'cd ..' doesn't get stuck eating backslashes.
+    // We only strip if the path is longer than "C:\" (3 characters).
+    USHORT charLen = ResolvedPath->Length / sizeof(WCHAR);
+    if (charLen > 3 && ResolvedPath->Buffer[charLen - 1] == L'\\')
+    {
+        ResolvedPath->Buffer[charLen - 1] = L'\0';
+        ResolvedPath->Length -= sizeof(WCHAR);
+    }
+
+    wprintf(L"[DEBUG] Resolved Path: %.*s\n", ResolvedPath->Length / sizeof(WCHAR), ResolvedPath->Buffer);
+
+    // Create a new directory reference (This calls NtOpenFile under the hood)
+    status = MyRtlpCreateNewDirectoryReference(ResolvedPath, ResolvedPath->MaximumLength, &NewDirRef);
+
+    // Check if NtOpenFile inside RtlpCreateNewDirectoryReference succeeded
+    if(!NT_SUCCESS(status))
+    {
+        wprintf(L"[DEBUG] MyRtlpCreateNewDirectoryReference failed! Status: 0x%08X\n", status);
+        return status;
+    }
+
+    wprintf(L"[DEBUG] Directory Handle successfully opened. Updating PEB...\n");
+
+    // Lock the PEB to safely update the environment
+    //RtlEnterCriticalSection(&FastPebLock);
+    my_RtlAcquirePebLock();
+
+    PCURDIR_REF OldDirRef = g_RtlpCurDirRef;
+
+    // --- MATCH NTDLL DECOMPILATION ---
+    // Update PEB ProcessParameters
+    ProcessParameters->CurrentDirectory.Handle = NewDirRef->Handle;
+    
+    // Instead of memcpy, we just swap the PEB pointer to our new struct's buffer!
+    ProcessParameters->CurrentDirectory.DosPath.Buffer = NewDirRef->DosPath.Buffer;
+    ProcessParameters->CurrentDirectory.DosPath.Length = NewDirRef->DosPath.Length;
+
+    // Update the global reference
+    g_RtlpCurDirRef = NewDirRef;
+
+    // Unlock PEB
+    //RtlLeaveCriticalSection(&FastPebLock);
+    my_RtlReleasePebLock();
+
+
+    // Clean up the old directory reference
+    if(RealOldDirRef)
+    {
+        if(InterlockedExchangeAdd(&RealOldDirRef->ReferenceCount, -1) == 1)
+        {
+            // If ref count hits 0, close handle and free memory
+            NtClose(RealOldDirRef->Handle);
+            my_RtlFreeHeap(ProcessHeap, 0, RealOldDirRef);
+        }
+    }
+
+    if(DynamicPath.Buffer != NULL)
+    {
+        my_RtlFreeHeap(ProcessHeap, 0, DynamicPath.Buffer);
+    }
+
+    return STATUS_SUCCESS;
+}
 
 #pragma endregion
 
@@ -837,7 +1141,7 @@ std::wstring static InternalCommand_LS(const std::wstring& args)
 		{
             wildcard = searchPath.substr(lastSlash + 1);
             searchPath = searchPath.substr(0, lastSlash);
-            if (searchPath.empty()) searchPath = L"\\"; // Handle root drive edge case
+            if(searchPath.empty()) searchPath = L"\\"; // Handle root drive edge case
         }
     }
 	else if(searchPath.find('*') != std::wstring::npos || searchPath.find('?') != std::wstring::npos)
@@ -926,12 +1230,31 @@ std::wstring static InternalCommand_LS(const std::wstring& args)
 std::wstring static InternalCommand_CD(const std::wstring& args)
 {
 
-	if(args == L"") return L"cd requires arguments.";
+    if(args.empty()) return L"cd requires arguments.\n";
 
-	BOOL status = SetCurrentDirectoryW(args.c_str());
-	if(status != TRUE) return L"Error: Failed to change directory to '" + args + L"'.\n";
+    UNICODE_STRING DestinationString;
+    NTSTATUS status;
 
-	return L"";
+    status = my_RtlInitUnicodeStringEx(&DestinationString, args.c_str());
+    if(!NT_SUCCESS(status))
+    {
+        wchar_t errMsg[128];
+        swprintf_s(errMsg, L"Error: RtlInitUnicodeStringEx failed. NTSTATUS: 0x%08X\n", status);
+        SetLastError(RtlNtStatusToDosError(status)); 
+        return std::wstring(errMsg);
+    }
+
+    status = MyRtlSetCurrentDirectory_U(&DestinationString);
+    if(NT_SUCCESS(status))
+    {
+        return L"";
+    }
+
+    wchar_t errMsg[256];
+    swprintf_s(errMsg, L"Error: Failed to change directory to '%s'. NTSTATUS: 0x%08X\n", args.c_str(), status);
+    
+    SetLastError(RtlNtStatusToDosError(status));
+    return std::wstring(errMsg);
 }
 
 std::wstring static InternalCommand_WHOAMI(const std::wstring& args)
@@ -1186,11 +1509,10 @@ std::wstring static InternalCommand_RMDIR(const std::wstring& args)
 
 // --------------------------------------------------------------------------------------------
 
-// MARK: Database Connections
 static std::wstring Custom_GetCurrentDirectoryW()
 {
 	#ifdef _WIN64
-		_MY_PPEB pPeb = (_MY_PPEB)__readgsqword(0x60);
+		PMY_PEB pPeb = (PMY_PEB)__readgsqword(0x60);
 	#else
 		PPEB _MY_PPEB = (_MY_PPEB)__readfsdword(0x30);
 	#endif
@@ -1262,6 +1584,51 @@ static NTSTATUS GetLibs()
 
 }
 
+static NTSTATUS ResolveFunctions()
+{
+    const CHAR cRtlInitUnicodeStringEx[] = "RtlInitUnicodeStringEx";
+    const CHAR cRtlAllocateHeap[] = "RtlAllocateHeap";
+    const CHAR cRtlFreeHeap[] = "RtlFreeHeap";
+    const CHAR cRtlCopyUnicodeString[] = "RtlCopyUnicodeString";
+    const CHAR cRtlAcquirePebLock[] = "RtlAcquirePebLock";
+    const CHAR cRtlReleasePebLock[] = "RtlReleasePebLock";
+    const CHAR cRtlGetFullPathName_UstrEx[] = "RtlGetFullPathName_UstrEx";
+    const CHAR cRtlDosPathNameToNtPathName_U_WithStatus[] = "RtlDosPathNameToNtPathName_U_WithStatus";
+    const CHAR cZwQueryVolumeInformationFile[] = "ZwQueryVolumeInformationFile";
+
+
+    my_RtlInitUnicodeStringEx = (pfnRtlInitUnicodeStringEx)ShellcodeFindExportAddress(sLibs_shell.hHookedNtdll, cRtlInitUnicodeStringEx, my_LoadLibraryA);
+    if(my_RtlInitUnicodeStringEx == NULL) __debugbreak();
+
+    my_RtlAllocateHeap = (pfnRtlAllocateHeap)ShellcodeFindExportAddress(sLibs_shell.hHookedNtdll, cRtlAllocateHeap, my_LoadLibraryA);
+    if(my_RtlAllocateHeap == NULL) __debugbreak();
+
+    my_RtlFreeHeap = (pfnRtlFreeHeap)ShellcodeFindExportAddress(sLibs_shell.hHookedNtdll, cRtlFreeHeap, my_LoadLibraryA);
+    if(my_RtlFreeHeap == NULL) __debugbreak();
+
+    my_RtlCopyUnicodeString = (pfnRtlCopyUnicodeString)ShellcodeFindExportAddress(sLibs_shell.hHookedNtdll, cRtlCopyUnicodeString, my_LoadLibraryA);
+    if(my_RtlCopyUnicodeString == NULL) __debugbreak();
+
+    my_RtlAcquirePebLock = (pfnRtlAcquirePebLock)ShellcodeFindExportAddress(sLibs_shell.hHookedNtdll, cRtlAcquirePebLock, my_LoadLibraryA);
+    if(my_RtlAcquirePebLock == NULL) __debugbreak();
+
+    my_RtlReleasePebLock = (pfnRtlReleasePebLock)ShellcodeFindExportAddress(sLibs_shell.hHookedNtdll, cRtlReleasePebLock, my_LoadLibraryA);
+    if(my_RtlReleasePebLock == NULL) __debugbreak();
+
+    my_RtlGetFullPathName_UstrEx = (pfnRtlGetFullPathName_UstrEx)ShellcodeFindExportAddress(sLibs_shell.hHookedNtdll, cRtlGetFullPathName_UstrEx, my_LoadLibraryA);
+    if(my_RtlGetFullPathName_UstrEx == NULL) __debugbreak();
+
+    my_RtlDosPathNameToNtPathName_U_WithStatus = (pfnRtlDosPathNameToNtPathName_U_WithStatus)ShellcodeFindExportAddress(sLibs_shell.hHookedNtdll, cRtlDosPathNameToNtPathName_U_WithStatus, my_LoadLibraryA);
+    if(my_RtlDosPathNameToNtPathName_U_WithStatus == NULL) __debugbreak();
+
+    my_ZwQueryVolumeInformationFile = (pfnZwQueryVolumeInformationFile)ShellcodeFindExportAddress(sLibs_shell.hHookedNtdll, cZwQueryVolumeInformationFile, my_LoadLibraryA);
+    if(my_ZwQueryVolumeInformationFile == NULL) __debugbreak();
+
+
+
+    return STATUS_SUCCESS;
+}
+
 int static InitializeMicroShell()
 {
 
@@ -1283,6 +1650,13 @@ int static InitializeMicroShell()
         return 0;
     }
 
+    result = ResolveFunctions();
+    if(!NT_SUCCESS(result))
+    {
+        LOG_W(L"Could not resolve some functions\n");
+        return 0;
+    }
+
     return 1;
 }
 
@@ -1299,6 +1673,7 @@ int main()
 	// ls stuff
     syscallEntries[numSyscalls++] = {"NtOpenFile", 0, 0, nullptr, nullptr};
     syscallEntries[numSyscalls++] = {"NtQueryDirectoryFile", 0, 0, nullptr, nullptr};
+    syscallEntries[numSyscalls++] = {"NtClose", 0, 0, nullptr, nullptr};
 	
 
     InitSyscallGate(syscallEntries, numSyscalls);
@@ -1307,7 +1682,7 @@ int main()
     {
         LOG_W(L"Could not initialize MicroShell\n");
         return 1;
-    } std::wcout << L"\nNtdll -> " << sLibs_shell.hHookedNtdll << std::endl;
+    } /*std::wcout << L"\nNtdll -> " << sLibs_shell.hHookedNtdll << std::endl;*/
 
 	while(true)
 	{
