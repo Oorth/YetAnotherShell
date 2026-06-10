@@ -1,1 +1,6 @@
-﻿  YetAnotherShell.vcxproj -> C:\Malware\YetAnotherShell\YetAnotherShell\x64\Debug\YetAnotherShell.exe
+﻿  shell.cpp
+C:\Malware\YetAnotherShell\YetAnotherShell\shell.cpp(1045,13): warning C4477: 'wprintf' : format string '%.*s' requires an argument of type 'int', but variadic argument 1 has type 'size_t'
+      C:\Malware\YetAnotherShell\YetAnotherShell\shell.cpp(1045,13):
+      this argument is used as a precision
+  
+  YetAnotherShell.vcxproj -> C:\Malware\YetAnotherShell\YetAnotherShell\x64\Debug\YetAnotherShell.exe

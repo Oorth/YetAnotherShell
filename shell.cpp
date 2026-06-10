@@ -327,8 +327,8 @@ typedef struct _CURDIR_REF
     HANDLE Handle;               // 0x08
     PVOID Unknown1;              // 0x10
     UNICODE_STRING DosPath;      // 0x18
+    PVOID PaddingTo30;           // 0x28 (Forces struct to 48 bytes)
 } CURDIR_REF, *PCURDIR_REF;
-
 
 typedef struct _FILE_FS_DEVICE_INFORMATION
 {
@@ -439,7 +439,6 @@ static bool __stdcall isSameW(const WCHAR* a, const WCHAR* b, SIZE_T len)
     }
     return true;
 }
-
 
 static WCHAR* __stdcall UllToHexW(unsigned __int64 val, WCHAR* buf_end, int max_chars)
 {
@@ -669,7 +668,6 @@ static int __cdecl ShellcodeSprintfW(LPWSTR pszDest, size_t cchDest, LPCWSTR psz
     return (int)(pDest - pszDest); // Number of characters written
 }
 
-    
 static void* __stdcall ShellcodeFindExportAddress(HMODULE hModule, LPCSTR lpProcNameOrOrdinal, pfnLoadLibraryA pLoadLibraryAFunc)
 {
     //-----------
@@ -1062,39 +1060,63 @@ NTSTATUS static MyRtlSetCurrentDirectory_U(PUNICODE_STRING PathName)
     //RtlEnterCriticalSection(&FastPebLock);
     my_RtlAcquirePebLock();
 
-    PCURDIR_REF OldDirRef = g_RtlpCurDirRef;
+    static PVOID* actualRtlpCurDirRefAddr = NULL;
 
-    // --- MATCH NTDLL DECOMPILATION ---
-    // Update PEB ProcessParameters
+    // --- Calculate OldDirRef unconditionally BEFORE we overwrite the PEB ---
+    PCURDIR_REF OldDirRef = (PCURDIR_REF)((PUCHAR)ProcessParameters->CurrentDirectory.DosPath.Buffer - 0x30);
+
+    if(actualRtlpCurDirRefAddr == NULL)
+    {
+        // Scan NTDLL's .data section to find the true RtlpCurDirRef
+        PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)sLibs_shell.hHookedNtdll;
+        PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((PUCHAR)sLibs_shell.hHookedNtdll + dosHeader->e_lfanew);
+        PIMAGE_SECTION_HEADER section = IMAGE_FIRST_SECTION(ntHeaders);
+            
+        for(WORD i = 0; i < ntHeaders->FileHeader.NumberOfSections; i++, section++)
+        {
+            if(memcmp(section->Name, ".data", 5) == 0)
+            {
+                PVOID* scanStart = (PVOID*)((PUCHAR)sLibs_shell.hHookedNtdll + section->VirtualAddress);
+                SIZE_T scanSize = section->Misc.VirtualSize / sizeof(PVOID);
+                    
+                for(SIZE_T j = 0; j < scanSize; j++)
+                {
+                    if(scanStart[j] == OldDirRef)
+                    {
+                        actualRtlpCurDirRefAddr = &scanStart[j];
+                        wprintf(L"[DEBUG] Found and Cached RtlpCurDirRef at 0x%p\n", actualRtlpCurDirRefAddr);
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // Update PEB ProcessParameters to point to our NewDirRef
     ProcessParameters->CurrentDirectory.Handle = NewDirRef->Handle;
-    
-    // Instead of memcpy, we just swap the PEB pointer to our new struct's buffer!
     ProcessParameters->CurrentDirectory.DosPath.Buffer = NewDirRef->DosPath.Buffer;
     ProcessParameters->CurrentDirectory.DosPath.Length = NewDirRef->DosPath.Length;
 
-    // Update the global reference
-    g_RtlpCurDirRef = NewDirRef;
+    // OVERWRITE NTDLL's INTERNAL GLOBAL
+    if(actualRtlpCurDirRefAddr) *actualRtlpCurDirRefAddr = NewDirRef;
+    else wprintf(L"[DEBUG] FATAL: FAILED to find RtlpCurDirRef in NTDLL memory!\n");
 
-    // Unlock PEB
-    //RtlLeaveCriticalSection(&FastPebLock);
     my_RtlReleasePebLock();
 
 
     // Clean up the old directory reference
-    if(RealOldDirRef)
+    if(OldDirRef)
     {
-        if(InterlockedExchangeAdd(&RealOldDirRef->ReferenceCount, -1) == 1)
+        if(InterlockedExchangeAdd(&OldDirRef->ReferenceCount, -1) == 1)
         {
             // If ref count hits 0, close handle and free memory
-            NtClose(RealOldDirRef->Handle);
-            my_RtlFreeHeap(ProcessHeap, 0, RealOldDirRef);
+            NtClose(OldDirRef->Handle);
+            my_RtlFreeHeap(ProcessHeap, 0, OldDirRef);
         }
     }
 
-    if(DynamicPath.Buffer != NULL)
-    {
-        my_RtlFreeHeap(ProcessHeap, 0, DynamicPath.Buffer);
-    }
+    if(DynamicPath.Buffer != NULL) my_RtlFreeHeap(ProcessHeap, 0, DynamicPath.Buffer);
 
     return STATUS_SUCCESS;
 }
