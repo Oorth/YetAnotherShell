@@ -370,7 +370,6 @@ typedef PVOID(NTAPI* pfnRtlAcquirePebLock)(VOID);
 typedef PVOID(NTAPI* pfnRtlReleasePebLock)(VOID);
 typedef NTSTATUS(NTAPI* pfnRtlGetFullPathName_UstrEx)(PUNICODE_STRING FileName, PUNICODE_STRING StaticString, PUNICODE_STRING DynamicString, PUNICODE_STRING *StringUsed, PSIZE_T FilePartPrefixCch, PBOOLEAN NameInvalid, PULONG InputPathType,PSIZE_T BytesRequired);
 typedef NTSTATUS(NTAPI* pfnRtlDosPathNameToNtPathName_U_WithStatus)(PWSTR DosFileName, PUNICODE_STRING NtFileName, PWSTR *FilePart, PVOID RelativeName);
-typedef NTSTATUS(NTAPI* pfnZwQueryVolumeInformationFile)(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PVOID FsInformation, ULONG Length, FS_INFORMATION_CLASS FsInformationClass);
 // --------------------------------------------------------------------------------------------
 
 std::wstring static ExecuteMicroShell(std::wstring input_command);
@@ -393,7 +392,6 @@ pfnRtlAcquirePebLock my_RtlAcquirePebLock = nullptr;
 pfnRtlReleasePebLock my_RtlReleasePebLock = nullptr;
 pfnRtlGetFullPathName_UstrEx my_RtlGetFullPathName_UstrEx = nullptr;
 pfnRtlDosPathNameToNtPathName_U_WithStatus my_RtlDosPathNameToNtPathName_U_WithStatus = nullptr;
-pfnZwQueryVolumeInformationFile my_ZwQueryVolumeInformationFile = nullptr;
 
 #pragma endregion
 
@@ -927,7 +925,7 @@ NTSTATUS static MyRtlpCreateNewDirectoryReference(PCUNICODE_STRING DosPath, USHO
     my_RtlFreeHeap(pPeb->ProcessHeap, 0, tempDosPath);
     if(!NT_SUCCESS(status))
     {
-        wprintf(L"[DIR-DEBUG] RtlDosPathNameToNtPathName failed! Status: 0x%08X\n", status);
+        //wprintf(L"[DIR-DEBUG] RtlDosPathNameToNtPathName failed! Status: 0x%08X\n", status);
         return status;
     }
 
@@ -938,22 +936,24 @@ NTSTATUS static MyRtlpCreateNewDirectoryReference(PCUNICODE_STRING DosPath, USHO
     // Open the directory
     InitializeObjectAttributes(&objAttr, &ntPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
 
-    status = NtOpenFile(&fileHandle, SYNCHRONIZE | FILE_TRAVERSE, &objAttr, &ioStatus, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    NTSTATUS sysstatus = (NTSTATUS)(INT_PTR)SysFunction("NtOpenFile", &fileHandle, SYNCHRONIZE | FILE_TRAVERSE, &objAttr, &ioStatus, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    //NTSTATUS sysstatus = NtOpenFile(& fileHandle, SYNCHRONIZE | FILE_TRAVERSE, & objAttr, & ioStatus, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
     // Free the NT path buffer (Matches: RtlFreeHeap(..., *((_QWORD *)&v14 + 1)))
     my_RtlFreeHeap(pPeb->ProcessHeap, 0, ntPath.Buffer);
-    if(!NT_SUCCESS(status))
+    if(!NT_SUCCESS(sysstatus))
     {
-        wprintf(L"[DIR-DEBUG] NtOpenFile failed! Status: 0x%08X (objAttr.Length = %lu bytes)\n", status, objAttr.Length);
-        return status;
+        //wprintf(L"[DIR-DEBUG] NtOpenFile failed! Status: 0x%08X (objAttr.Length = %lu bytes)\n", status, objAttr.Length);
+        return sysstatus;
     }
 
 
     // Query Device Characteristics (Information Class 4)
-    status = my_ZwQueryVolumeInformationFile(fileHandle, &ioStatus, &deviceInfo, sizeof(deviceInfo), (FS_INFORMATION_CLASS)4);
+    //status = my_ZwQueryVolumeInformationFile(fileHandle, &ioStatus, &deviceInfo, sizeof(deviceInfo), (FS_INFORMATION_CLASS)4);
+    sysstatus = (NTSTATUS)(INT_PTR)SysFunction("ZwQueryVolumeInformationFile", fileHandle, &ioStatus, &deviceInfo, sizeof(deviceInfo), (FS_INFORMATION_CLASS)4);
     if(!NT_SUCCESS(status))
     {
-        wprintf(L"[DIR-DEBUG] ZwQueryVolumeInformationFile failed! Status: 0x%08X (sizeof deviceInfo = %llu bytes)\n", status, (unsigned long long)sizeof(deviceInfo));
-        NtClose(fileHandle);
+        //wprintf(L"[DIR-DEBUG] ZwQueryVolumeInformationFile failed! Status: 0x%08X (sizeof deviceInfo = %llu bytes)\n", status, (unsigned long long)sizeof(deviceInfo));
+        SysFunction("NtClose", fileHandle);
         return status;
     }
 
@@ -962,7 +962,7 @@ NTSTATUS static MyRtlpCreateNewDirectoryReference(PCUNICODE_STRING DosPath, USHO
     if(!dirRef)
     {
         status = STATUS_NO_MEMORY;
-        NtClose(fileHandle);
+        SysFunction("NtClose", fileHandle);
         return status;
     }
 
@@ -991,11 +991,7 @@ NTSTATUS static MyRtlpCreateNewDirectoryReference(PCUNICODE_STRING DosPath, USHO
         dirRef->DosPath.Buffer[charCount] = L'\\';
         dirRef->DosPath.Buffer[charCount + 1] = L'\0';
         dirRef->DosPath.Length += sizeof(WCHAR);
-    }
-    else
-    {
-        dirRef->DosPath.Buffer[charCount] = L'\0';
-    }
+    } else dirRef->DosPath.Buffer[charCount] = L'\0';
 
     *OutDirRef = dirRef;
     return STATUS_SUCCESS;
@@ -1029,7 +1025,7 @@ NTSTATUS static MyRtlSetCurrentDirectory_U(PUNICODE_STRING PathName)
     status = my_RtlGetFullPathName_UstrEx(PathName, &StaticPath, &DynamicPath, &ResolvedPath, NULL, NULL, &inputPathType, NULL);
     if(!NT_SUCCESS(status) || ResolvedPath == NULL)
     {
-        wprintf(L"[DEBUG] RtlGetFullPathName_UstrEx failed! Status: 0x%08X\n", status);
+        //wprintf(L"[DEBUG] RtlGetFullPathName_UstrEx failed! Status: 0x%08X\n", status);
         return status != 0 ? status : STATUS_OBJECT_NAME_INVALID;
     }
 
@@ -1042,7 +1038,7 @@ NTSTATUS static MyRtlSetCurrentDirectory_U(PUNICODE_STRING PathName)
         ResolvedPath->Length -= sizeof(WCHAR);
     }
 
-    wprintf(L"[DEBUG] Resolved Path: %.*s\n", ResolvedPath->Length / sizeof(WCHAR), ResolvedPath->Buffer);
+    //wprintf(L"[DEBUG] Resolved Path: %.*s\n", ResolvedPath->Length / sizeof(WCHAR), ResolvedPath->Buffer);
 
     // Create a new directory reference (This calls NtOpenFile under the hood)
     status = MyRtlpCreateNewDirectoryReference(ResolvedPath, ResolvedPath->MaximumLength, &NewDirRef);
@@ -1050,11 +1046,11 @@ NTSTATUS static MyRtlSetCurrentDirectory_U(PUNICODE_STRING PathName)
     // Check if NtOpenFile inside RtlpCreateNewDirectoryReference succeeded
     if(!NT_SUCCESS(status))
     {
-        wprintf(L"[DEBUG] MyRtlpCreateNewDirectoryReference failed! Status: 0x%08X\n", status);
+        //wprintf(L"[DEBUG] MyRtlpCreateNewDirectoryReference failed! Status: 0x%08X\n", status);
         return status;
     }
 
-    wprintf(L"[DEBUG] Directory Handle successfully opened. Updating PEB...\n");
+    //wprintf(L"[DEBUG] Directory Handle successfully opened. Updating PEB...\n");
 
     // Lock the PEB to safely update the environment
     //RtlEnterCriticalSection(&FastPebLock);
@@ -1084,7 +1080,7 @@ NTSTATUS static MyRtlSetCurrentDirectory_U(PUNICODE_STRING PathName)
                     if(scanStart[j] == OldDirRef)
                     {
                         actualRtlpCurDirRefAddr = &scanStart[j];
-                        wprintf(L"[DEBUG] Found and Cached RtlpCurDirRef at 0x%p\n", actualRtlpCurDirRefAddr);
+                        //wprintf(L"[DEBUG] Found and Cached RtlpCurDirRef at 0x%p\n", actualRtlpCurDirRefAddr);
                         break;
                     }
                 }
@@ -1100,10 +1096,10 @@ NTSTATUS static MyRtlSetCurrentDirectory_U(PUNICODE_STRING PathName)
 
     // OVERWRITE NTDLL's INTERNAL GLOBAL
     if(actualRtlpCurDirRefAddr) *actualRtlpCurDirRefAddr = NewDirRef;
-    else wprintf(L"[DEBUG] FATAL: FAILED to find RtlpCurDirRef in NTDLL memory!\n");
+    //else wprintf(L"[DEBUG] FATAL: FAILED to find RtlpCurDirRef in NTDLL memory!\n");
 
     my_RtlReleasePebLock();
-
+    //wprintf(L"[DEBUG] Peb lock released\n");
 
     // Clean up the old directory reference
     if(OldDirRef)
@@ -1111,7 +1107,7 @@ NTSTATUS static MyRtlSetCurrentDirectory_U(PUNICODE_STRING PathName)
         if(InterlockedExchangeAdd(&OldDirRef->ReferenceCount, -1) == 1)
         {
             // If ref count hits 0, close handle and free memory
-            NtClose(OldDirRef->Handle);
+            SysFunction("NtClose", OldDirRef->Handle);
             my_RtlFreeHeap(ProcessHeap, 0, OldDirRef);
         }
     }
@@ -1616,7 +1612,6 @@ static NTSTATUS ResolveFunctions()
     const CHAR cRtlReleasePebLock[] = "RtlReleasePebLock";
     const CHAR cRtlGetFullPathName_UstrEx[] = "RtlGetFullPathName_UstrEx";
     const CHAR cRtlDosPathNameToNtPathName_U_WithStatus[] = "RtlDosPathNameToNtPathName_U_WithStatus";
-    const CHAR cZwQueryVolumeInformationFile[] = "ZwQueryVolumeInformationFile";
 
 
     my_RtlInitUnicodeStringEx = (pfnRtlInitUnicodeStringEx)ShellcodeFindExportAddress(sLibs_shell.hHookedNtdll, cRtlInitUnicodeStringEx, my_LoadLibraryA);
@@ -1642,10 +1637,6 @@ static NTSTATUS ResolveFunctions()
 
     my_RtlDosPathNameToNtPathName_U_WithStatus = (pfnRtlDosPathNameToNtPathName_U_WithStatus)ShellcodeFindExportAddress(sLibs_shell.hHookedNtdll, cRtlDosPathNameToNtPathName_U_WithStatus, my_LoadLibraryA);
     if(my_RtlDosPathNameToNtPathName_U_WithStatus == NULL) __debugbreak();
-
-    my_ZwQueryVolumeInformationFile = (pfnZwQueryVolumeInformationFile)ShellcodeFindExportAddress(sLibs_shell.hHookedNtdll, cZwQueryVolumeInformationFile, my_LoadLibraryA);
-    if(my_ZwQueryVolumeInformationFile == NULL) __debugbreak();
-
 
 
     return STATUS_SUCCESS;
@@ -1696,6 +1687,7 @@ int main()
     syscallEntries[numSyscalls++] = {"NtOpenFile", 0, 0, nullptr, nullptr};
     syscallEntries[numSyscalls++] = {"NtQueryDirectoryFile", 0, 0, nullptr, nullptr};
     syscallEntries[numSyscalls++] = {"NtClose", 0, 0, nullptr, nullptr};
+    syscallEntries[numSyscalls++] = {"ZwQueryVolumeInformationFile", 0, 0, nullptr, nullptr};
 	
 
     InitSyscallGate(syscallEntries, numSyscalls);
